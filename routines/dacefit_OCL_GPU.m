@@ -170,17 +170,35 @@ function [FKF, FKY, YKY, detK] = BCCL_GPU(par, gamma2, loop)
         Di = permute(sum(invRir.*R, 2), [3 2 1]) + delta2;
         Fi = permute(par.F(:,:,b) - pagefun(@mtimes, invRir, par.F(:,:,1:i)), [3 2 1]);
         Yi = permute(par.Y(:,:,b) - pagefun(@mtimes, invRir, par.Y(:,:,1:i)), [3 2 1]);
-        Ki = zeros(par.n(b),i,i, 'gpuArray');
-        for r = 2 : ceil((i+1)/2)
-            r1 = r;    r2 = i-r+2;
-            indexS = [1:r1-1 1:r2-1];
-            Ss = S(:,:,indexS);    Ss2 = S2(:,:,indexS);
-            indexR = [r1*ones(1,r1-1) r2*ones(1,r2-1)];
-            Sr = S(:,:,indexR);    Sr2 = S2(:,:,indexR);
-            R = exp(2*pagefun(@mtimes, Sr, pagefun(@transpose,Ss)) - (Sr2+rot90(Ss2))); % Rrs
-            Krs = sum(pagefun(@mtimes, invRir(:,:,indexR), R) .* invRir(:,:,indexS),2);
-            Ki(:,r1,1:r1-1) = Krs(:,:,1:r1-1);
-            Ki(:,r2,1:r2-1) = Krs(:,:,r1:end);
+        if i > 1
+            % Build upper-triangle index pairs (row > col) on CPU — one shot
+            idx_all_r = repelem(1:i, i);
+            idx_all_s = repmat(1:i, [1 i]);
+            keep = idx_all_r > idx_all_s;
+            idx_r = idx_all_r(keep);   % 1 × i(i-1)/2
+            idx_s = idx_all_s(keep);
+
+            % Two GPU copies of S and S2 (was: ~3i per r-iteration)
+            Sr_b = S(:,:,idx_r);    Ss_b = S(:,:,idx_s);
+            S2r_b = S2(:,:,idx_r);  S2s_b = S2(:,:,idx_s);
+
+            R_batch = exp(2 * pagefun(@mtimes, Sr_b, pagefun(@transpose, Ss_b)) ...
+                    - (S2r_b + rot90(S2s_b)));
+
+            invRr_b = invRir(:,:,idx_r);  invRs_b = invRir(:,:,idx_s);
+            T = pagefun(@mtimes, invRr_b, R_batch);
+            Krs_up = squeeze(sum(T .* invRs_b, 2));  % N × i(i-1)/2
+            if par.n(b) == 1
+                Krs_up = Krs_up(:)';
+            end
+
+            % Scatter upper-triangle values into Ki via linear indexing
+            lin_idx = sub2ind([i i], idx_r, idx_s);
+            Ki = zeros(par.n(b), i*i, 'gpuArray');
+            Ki(:, lin_idx) = Krs_up;
+            Ki = reshape(Ki, [par.n(b) i i]);
+        else
+            Ki = zeros(par.n(b), i, i, 'gpuArray');
         end
         Ki = permute(Ki, [3 2 1]);
         Ki = Ki + pagefun(@transpose, Ki) + pagefun(@times, repmat(Di,[1,i,1]), eye(i));

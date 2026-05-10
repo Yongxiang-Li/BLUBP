@@ -38,22 +38,38 @@ function  [Y, V, dmodel] = predictor_BLUBP_GPU(X, dmodel, dif)
         invRir = pagefun(@mtimes, R, invRd);
         Di = permute(sum(invRir.*R, 2), [3 2 1]) + delta2;
         Fi = permute(dmodel.regr(X(index,:)) - pagefun(@mtimes, invRir, par.F), [3 2 1]);
-        Ki = zeros(n,k,k, 'gpuArray');    Ki_ = zeros(n,k,k, 'gpuArray');  
         Yi = permute(pagefun(@mtimes, invRir, par.Y(:,:,1:k)), [3 2 1]);
-        parfor r = 2 : ceil((k+1)/2)
-            r1 = r;    r2 = k-r+2;
-            indexS = [1:r1-1 1:r2-1];
-            Ss = par.S(:,:,indexS);    Ss2 = par.S2(:,:,indexS);
-            indexR = [r1*ones(1,r1-1) r2*ones(1,r2-1)];
-            Sr = par.S(:,:,indexR);    Sr2 = par.S2(:,:,indexR);
-            R = exp(2*pagefun(@mtimes, Sr, pagefun(@transpose,Ss)) - (Sr2+rot90(Ss2))); % Rrs
-            Krs = sum(pagefun(@mtimes, invRir(:,:,indexR), R) .* invRir(:,:,indexS),2);
-            v1 = zeros(n,k, 'gpuArray');    v2 = zeros(n,k, 'gpuArray');
-            v1(:,1:r1-1) = Krs(:,:,1:r1-1);    v2(:,1:r2-1) = Krs(:,:,r1:end);
-            Ki(:,:,r) = v1;     Ki_(:,:,r) = v2;
+        if k > 1
+            % Build upper-triangle index pairs (row > col) on CPU — one shot
+            idx_all_r = repelem(1:k, k);
+            idx_all_s = repmat(1:k, [1 k]);
+            keep = idx_all_r > idx_all_s;
+            idx_r = idx_all_r(keep);   % 1 × k(k-1)/2
+            idx_s = idx_all_s(keep);
+
+            % Two GPU copies of par.S and par.S2 (was: ~3k per r-iteration)
+            Sr_b = par.S(:,:,idx_r);    Ss_b = par.S(:,:,idx_s);
+            S2r_b = par.S2(:,:,idx_r);  S2s_b = par.S2(:,:,idx_s);
+
+            R_batch = exp(2 * pagefun(@mtimes, Sr_b, pagefun(@transpose, Ss_b)) ...
+                    - (S2r_b + rot90(S2s_b)));
+
+            invRr_b = invRir(:,:,idx_r);  invRs_b = invRir(:,:,idx_s);
+            T = pagefun(@mtimes, invRr_b, R_batch);
+            Krs_up = squeeze(sum(T .* invRs_b, 2));  % n × k(k-1)/2
+            if n == 1
+                Krs_up = Krs_up(:)';
+            end
+
+            % Scatter upper-triangle values into Ki via linear indexing
+            lin_idx = sub2ind([k k], idx_r, idx_s);
+            Ki = zeros(n, k*k, 'gpuArray');
+            Ki(:, lin_idx) = Krs_up;
+            Ki = reshape(Ki, [n k k]);
+        else
+            Ki = zeros(n, k, k, 'gpuArray');
         end
-        Ki(:,:,k-(2:ceil((k+1)/2))+2) = Ki_(:,:,2:ceil((k+1)/2));
-        Ki = permute(Ki, [2 3 1]); % Ki = permute(Ki, [3 2 1]);
+        Ki = permute(Ki, [2 3 1]);
         Ki = Ki + pagefun(@transpose, Ki) + pagefun(@times, repmat(Di,[1,k,1]), eye(k));
 
         Il = pagefun(@mldivide, Ki, Di); % inverse of lambda
