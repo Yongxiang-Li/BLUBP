@@ -10,12 +10,12 @@ options.FitInParallel = false;
 options.logOn = false;
 
 results = [];
-fields = {'RMSE', 'ptime'};
-pool = gcp('nocreate');    if isempty(pool),  parpool(4);  end
+fields = {'RMSE', 'mtime', 'ptime'};
+pool = gcp('nocreate');    if isempty(pool) && options.FitInParallel,  parpool(4);  end
 for i = 1:10
     rng(i);
     
-    k = 40;    m = 40;    p = size(Xd,2);
+    k = 80;    m = 80;    p = size(Xd,2);
     level = struct('S', {[]}, 'Y', {[]});
     design = repmat(level, k, 1);
     I = reshape(randperm(length(Yd),k*m), m, k);
